@@ -1,0 +1,210 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Length 3134 >>
+stream
+BT /F2 18 Tf 1 0 0 1 54 748 Tm (Symplichain Hackathon Submission) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 715 Tm (This repository contains my submission for the Symplichain Software Engineering Intern) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 700 Tm (hackathon.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 677 Tm (- Written response: `submission.pdf`) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 662 Tm (- CI/CD workflow: `.github/workflows/deploy.yml`) Tj ET
+BT /F2 14 Tf 1 0 0 1 54 639 Tm (Part 1: Shared Gateway Problem) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 611 Tm (Architecture) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 586 Tm (I would keep the design simple:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 563 Tm (- `API gateway \(Django/FastAPI\)`: receives requests from all customers) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 548 Tm (- `Redis`: stores per-customer queues and scheduler state) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 533 Tm (- `Celery`: runs the dispatcher and retry jobs) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 518 Tm (- `PostgreSQL`: stores request status and audit trail) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 503 Tm (- `External API`: limited to 3 requests/second) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 480 Tm (Why this approach:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 457 Tm (- The main challenge is not computation, it is outbound traffic control) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 442 Tm (- Redis + Celery is enough for this scale and much cheaper than introducing Kafka) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 427 Tm (- Keeping the rate limiter in one place makes the system easier to reason about) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 404 Tm (How I Would Enforce the 3 req/sec Limit) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 379 Tm (I would not allow every worker to call the external API directly.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 356 Tm (- Each customer gets a Redis queue: `queue:<customer_id>`) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 341 Tm (- The gateway validates the request quickly, stores its metadata, and pushes it to that) Tj ET
+BT /F1 11 Tf 1 0 0 1 84 326 Tm (queue) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 311 Tm (- A single dispatcher runs once every second) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 296 Tm (- On each tick, it selects at most 3 requests total and sends them to the external API) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 273 Tm (Why this guarantees the limit:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 250 Tm (- Only the dispatcher is allowed to make outbound calls) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 235 Tm (- The dispatcher has a hard cap of 3 sends per second) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 220 Tm (- Any excess traffic simply waits in Redis) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 197 Tm (If I wanted high availability later, I would run a standby dispatcher and protect the active) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 182 Tm (one with a Redis lock.) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 159 Tm (Fairness Across Customers) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 134 Tm (A single global FIFO queue is simple, but not fair. One heavy customer could fill the queue) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 119 Tm (and delay everyone else.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 96 Tm (To avoid that, I would use **per-customer queues with round-robin scheduling**:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 73 Tm (- Maintain one queue per customer) Tj ET
+endstream
+endobj
+4 0 obj
+<< /Length 3088 >>
+stream
+BT /F1 11 Tf 1 0 0 1 72 748 Tm (- Keep a rotating pointer to the next customer to serve) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 733 Tm (- In each 1-second cycle, take at most 1 request from a customer before moving to the) Tj ET
+BT /F1 11 Tf 1 0 0 1 84 718 Tm (next one) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 703 Tm (- Continue until 3 requests are selected) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 680 Tm (This avoids starvation. A noisy customer can still use spare capacity, but not at the cost) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 665 Tm (of blocking everyone else.) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 642 Tm (Retry Strategy) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 617 Tm (Retries should be selective:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 594 Tm (- `Retryable`: timeout, temporary 5xx, connection reset, occasional 429) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 579 Tm (- `Non-retryable`: invalid payload, auth failure, bad request) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 556 Tm (Policy:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 533 Tm (- Exponential backoff with jitter) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 518 Tm (- Example delays: 2s, 5s, 15s, 30s, 60s) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 503 Tm (- Max 5 attempts) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 488 Tm (- After that, mark the request as `failed` and surface it for review) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 465 Tm (Why:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 442 Tm (- Backoff prevents hammering a slow dependency) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 427 Tm (- Jitter avoids synchronized retries) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 412 Tm (- Not retrying 4xx errors keeps the queue healthy) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 389 Tm (Request Flow) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 364 Tm (1. Customer sends request to the shared gateway.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 349 Tm (2. Gateway authenticates, validates, stores request metadata, and pushes the job into) Tj ET
+BT /F1 11 Tf 1 0 0 1 90 334 Tm (that customer's Redis queue.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 319 Tm (3. Dispatcher wakes up every second.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 304 Tm (4. Dispatcher selects up to 3 jobs using round-robin across non-empty queues.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 289 Tm (5. Dispatcher sends requests to the external API.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 274 Tm (6. Success updates the request state.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 259 Tm (7. Retryable failures are rescheduled with backoff.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 244 Tm (8. Permanent failures are marked as failed.) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 221 Tm (Trade-offs) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 196 Tm (- `Why this approach:` simple, cheap, and easy to defend in production) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 181 Tm (- `Why not a global queue:` easier, but unfair during tenant bursts) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 166 Tm (- `Why not Kafka:` useful at larger scale, but too heavy for this problem) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 151 Tm (- `Why not worker-side throttling:` harder to guarantee a strict global limit across) Tj ET
+BT /F1 11 Tf 1 0 0 1 84 136 Tm (multiple workers) Tj ET
+BT /F2 14 Tf 1 0 0 1 54 113 Tm (Part 2: Mobile App Architecture) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 85 Tm (Interaction Model) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Length 2951 >>
+stream
+BT /F1 11 Tf 1 0 0 1 54 748 Tm (I would choose a **hybrid model**:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 725 Tm (- Main workflows stay click-based and predictable) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 710 Tm (- AI acts as an assistant, not the primary interface) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 687 Tm (Examples:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 664 Tm (- Click-based flows for order creation, approval, tracking, and image upload) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 649 Tm (- AI assistance for search, summarization, and suggested next actions) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 626 Tm (Why:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 603 Tm (- Operations users usually prefer speed and reliability over chat-first UX) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 588 Tm (- A fully AI-driven app is harder to test and less predictable) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 573 Tm (- Hybrid gives AI value without making the product feel fragile) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 550 Tm (Tech Stack Choice) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 525 Tm (I would choose **React Native with TypeScript**.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 502 Tm (Why:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 479 Tm (- One codebase for iOS and Android means faster delivery) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 464 Tm (- Lower cost than maintaining separate Swift and Kotlin apps) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 449 Tm (- Better maintainability if the web team already uses React) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 434 Tm (- Easier to share API patterns and UI decisions with the web app) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 411 Tm (I would only choose native apps first if offline support, camera/scanner features, or) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 396 Tm (platform-specific SDKs were a major requirement.) Tj ET
+BT /F2 14 Tf 1 0 0 1 54 373 Tm (Part 3: CI/CD Pipeline) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 345 Tm (I would keep deployment branch-driven:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 322 Tm (- `staging` branch deploys to staging) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 307 Tm (- `main` branch deploys to production) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 284 Tm (The actual workflow is included in) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 269 Tm ([`.github/workflows/deploy.yml`]\(./.github/workflows/deploy.yml\).) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 246 Tm (High-level pipeline:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 223 Tm (- Run backend tests for Django) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 208 Tm (- Build the React frontend) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 193 Tm (- Deploy backend to EC2 over SSH) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 178 Tm (- Sync frontend build output to S3) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 155 Tm (Why this is the right level of complexity:) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 132 Tm (- It is simple enough for a small team to maintain) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 117 Tm (- It matches the current stack directly) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 102 Tm (- It keeps staging and production separate without adding unnecessary tooling) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 79 Tm (Later improvements I would suggest:) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Length 3468 >>
+stream
+BT /F1 11 Tf 1 0 0 1 72 748 Tm (- Dockerize backend deployment for consistency) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 733 Tm (- Use Terraform for infra management) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 718 Tm (- Replace long-lived AWS keys with GitHub OIDC + IAM roles) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 703 Tm (- Add CloudFront invalidation after S3 deploys) Tj ET
+BT /F2 14 Tf 1 0 0 1 54 680 Tm (Part 4: Debugging Scenario) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 652 Tm (Problem flow:) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 629 Tm (`Driver App -> Django API -> S3 -> Celery -> Bedrock -> PostgreSQL`) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 606 Tm (I would debug in the same order as the request path instead of jumping straight to Celery or) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 591 Tm (Bedrock.) Tj ET
+BT /F2 12 Tf 1 0 0 1 54 568 Tm (Step-by-step Approach) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 543 Tm (1. Reproduce the issue with one known image and one known user.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 528 Tm (Why: it is much easier to trace one request end to end than to reason from noisy production) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 513 Tm (traffic.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 490 Tm (2. Check whether the request reaches Django.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 475 Tm (Why: if the API never receives it, the issue is in the client, auth, or network path.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 460 Tm (Tools: Django logs, nginx/ALB logs, CloudWatch.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 437 Tm (3. Verify the S3 upload step.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 422 Tm (Why: if the object never lands in S3, the bug is before Celery and Bedrock.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 407 Tm (Tools: S3 console, boto3 error logs, CloudWatch.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 384 Tm (4. Confirm Celery task creation and worker pickup.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 369 Tm (Why: if S3 succeeded but no task was queued, the issue is in app logic or broker flow.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 354 Tm (Tools: Celery worker logs, Flower, Redis queue inspection.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 331 Tm (5. Inspect the Bedrock call.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 316 Tm (Why: sometimes the upload succeeds and the actual failure is in downstream inference.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 301 Tm (Tools: CloudWatch, worker logs, Bedrock invocation errors.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 278 Tm (6. Check PostgreSQL writeback.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 263 Tm (Why: the system may look like an upload failure when the final DB update is the real issue.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 248 Tm (Tools: Django logs, PostgreSQL logs, targeted SQL checks.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 225 Tm (7. Compare one failing case with one successful case.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 210 Tm (Why: patterns like file type, file size, or environment mismatch often show up quickly.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 187 Tm (8. Add temporary tracing across each step if the issue is intermittent.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 172 Tm (Why: step-level visibility reduces guesswork.) Tj ET
+BT /F2 14 Tf 1 0 0 1 54 149 Tm (Conclusion) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 121 Tm (I focused on simple, scalable, and cost-efficient solutions that are realistic for a small) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 106 Tm (engineering team to build and operate. The common theme across all four parts is to keep the) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 91 Tm (design easy to reason about, make failure handling explicit, and avoid over-engineering too) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 76 Tm (early.) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Pages /Count 4 /Kids [8 0 R 9 0 R 10 0 R 11 0 R] >>
+endobj
+8 0 obj
+<< /Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 3 0 R >>
+endobj
+9 0 obj
+<< /Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 4 0 R >>
+endobj
+10 0 obj
+<< /Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 5 0 R >>
+endobj
+11 0 obj
+<< /Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 6 0 R >>
+endobj
+12 0 obj
+<< /Type /Catalog /Pages 7 0 R >>
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000003346 00000 n 
+0000006486 00000 n 
+0000009489 00000 n 
+0000013009 00000 n 
+0000013086 00000 n 
+0000013222 00000 n 
+0000013358 00000 n 
+0000013495 00000 n 
+0000013632 00000 n 
+trailer
+<< /Size 13 /Root 12 0 R >>
+startxref
+13682
+%%EOF

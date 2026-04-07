@@ -1,0 +1,126 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set deployment target
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "EC2_HOST=${{ secrets.PROD_EC2_HOST }}" >> "$GITHUB_ENV"
+            echo "EC2_USER=${{ secrets.PROD_EC2_USER }}" >> "$GITHUB_ENV"
+            echo "REMOTE_DIR=/srv/symplichain-prod" >> "$GITHUB_ENV"
+            echo "DJANGO_SERVICE=symplichain-prod" >> "$GITHUB_ENV"
+            echo "CELERY_SERVICE=symplichain-prod-celery" >> "$GITHUB_ENV"
+          else
+            echo "EC2_HOST=${{ secrets.STAGING_EC2_HOST }}" >> "$GITHUB_ENV"
+            echo "EC2_USER=${{ secrets.STAGING_EC2_USER }}" >> "$GITHUB_ENV"
+            echo "REMOTE_DIR=/srv/symplichain-staging" >> "$GITHUB_ENV"
+            echo "DJANGO_SERVICE=symplichain-staging" >> "$GITHUB_ENV"
+            echo "CELERY_SERVICE=symplichain-staging-celery" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        run: python manage.py test
+
+      - name: Setup SSH key for production
+        if: github.ref_name == 'main'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PROD_EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Setup SSH key for staging
+        if: github.ref_name == 'staging'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync backend to EC2
+        run: |
+          rsync -avz --delete backend/ "$EC2_USER@$EC2_HOST:$REMOTE_DIR/backend/"
+
+      - name: Deploy backend on EC2
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" << EOF
+            set -e
+            cd "$REMOTE_DIR/backend"
+            python3 -m venv ../.venv || true
+            . ../.venv/bin/activate
+            pip install -r requirements.txt
+            python manage.py migrate --noinput
+            python manage.py collectstatic --noinput
+            sudo systemctl restart "$DJANGO_SERVICE"
+            sudo systemctl restart "$CELERY_SERVICE"
+          EOF
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set deployment target
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "S3_BUCKET=${{ secrets.PROD_S3_BUCKET }}" >> "$GITHUB_ENV"
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.PROD_AWS_ACCESS_KEY_ID }}" >> "$GITHUB_ENV"
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}" >> "$GITHUB_ENV"
+            echo "AWS_REGION=${{ secrets.PROD_AWS_REGION }}" >> "$GITHUB_ENV"
+          else
+            echo "S3_BUCKET=${{ secrets.STAGING_S3_BUCKET }}" >> "$GITHUB_ENV"
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.STAGING_AWS_ACCESS_KEY_ID }}" >> "$GITHUB_ENV"
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}" >> "$GITHUB_ENV"
+            echo "AWS_REGION=${{ secrets.STAGING_AWS_REGION }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy frontend to S3
+        run: aws s3 sync frontend/build/ "s3://$S3_BUCKET" --delete
